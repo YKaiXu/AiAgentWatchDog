@@ -6,6 +6,7 @@
 
 - 🎯 **智能评分系统** - 多维度检测卡死进程，避免误杀
 - 🛡️ **多层保护机制** - 保护 systemd 服务、关键进程、持久化应用
+- 🔄 **systemd 服务安全重启** - 通过 systemctl restart 而非 kill
 - ⏱️ **定时清理** - 通过 systemd timer 每分钟自动执行
 - 📊 **详细日志** - 记录清理原因和评分详情
 - 🔧 **易于配置** - 支持自定义白名单和阈值
@@ -34,9 +35,8 @@ sudo ./install.sh
 
 | 保护类型 | 检测方法 | 示例 |
 |---------|---------|------|
-| systemd 服务 | 检查 cgroup | nginx, picoclaw, openclaw |
-| 关键系统进程 | 命令行匹配 | sshd, journald, docker |
-| 持久化应用 | 关键字匹配 | persist, daemon, agent |
+| 关键系统进程 | 命令行匹配 | sshd, journald, systemd |
+| 持久化应用 | 关键字匹配 | persist, daemon, tmux |
 | 活跃网络连接 | ss 检查 ESTAB | SSH 会话 |
 | 活跃 I/O | /proc/pid/io | 读写文件的进程 |
 
@@ -51,6 +51,16 @@ sudo ./install.sh
 | 运行 > 10 分钟 | +10 | 时间过长 |
 
 **总分 >= 50 才会被清理**
+
+### 处理方式
+
+| 进程类型 | 处理方式 |
+|---------|---------|
+| 关键系统进程 | 🛡️ 保护，不清理 |
+| 持久化应用 | 🛡️ 保护，不清理 |
+| 有活跃连接/I/O | 🛡️ 保护，不清理 |
+| systemd 服务 | 🔄 `systemctl restart` 安全重启 |
+| 普通进程 | 🧹 `kill -9` 直接清理 |
 
 ## 使用示例
 
@@ -96,6 +106,11 @@ sudo /opt/aiagentwatchdog/install.sh --uninstall
 - 长时间运行的自动化脚本
 - 容易产生僵尸进程的环境
 - VPS/云服务器资源管理
+
+## 已部署主机
+
+- OVH VPS (51.81.223.234) - PicoClaw
+- AI 主机 (192.168.1.8) - OpenClaw
 
 ## 许可证
 
