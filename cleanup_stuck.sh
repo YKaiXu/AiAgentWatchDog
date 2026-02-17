@@ -2,10 +2,31 @@
 # AiAgentWatchDog - 智能清理卡死进程
 # 
 # 功能：
-# - 智能检测卡死进程
+# - 智能检测卡死进程（评分系统）
 # - 保护正常持久化进程
 # - systemd 服务安全重启
-# - 详细的评分系统
+# - D 状态进程强制终止
+# - 详细的评分系统和日志
+#
+# 进程状态说明：
+# - R: 运行中 (Running)
+# - S: 可中断睡眠 (Interruptible Sleep) - 正常
+# - D: 不可中断睡眠 (Uninterruptible Sleep) - 可能卡死
+# - Z: 僵尸进程 (Zombie) - 需要清理
+# - T: 停止 (Stopped)
+#
+# 评分系统：
+# - 状态=D: +100 分
+# - 孤儿进程: +40 分
+# - CPU=0%: +20 分
+# - 无网络/I/O活动: +15 分
+# - 运行>600秒: +10 分
+# - 阈值: 50 分
+#
+# 清理策略：
+# 1. systemd 服务进程 → systemctl restart（失败则 kill -9）
+# 2. 普通进程 → kill -9
+# 3. D 状态进程 → 强制 kill -9（即使 systemctl restart 失败）
 #
 # 用法：
 #   ./cleanup_stuck.sh           # 执行清理
@@ -22,6 +43,10 @@ STUCK_THRESHOLD=50
 MIN_UPTIME=120
 DRY_RUN=false
 LOG_FILE="/var/log/cleanup_stuck.log"
+
+# D 状态进程特殊配置
+D_STATE_FORCE_KILL=true
+D_STATE_MAX_WAIT=5
 
 # ============================================
 # 解析参数
@@ -43,6 +68,15 @@ while [[ $# -gt 0 ]]; do
             echo "配置:"
             echo "  STUCK_THRESHOLD=$STUCK_THRESHOLD (卡死阈值分数)"
             echo "  MIN_UPTIME=$MIN_UPTIME (最小检查运行时间/秒)"
+            echo "  D_STATE_FORCE_KILL=$D_STATE_FORCE_KILL (D状态进程强制终止)"
+            echo ""
+            echo "评分系统:"
+            echo "  状态=D: +100 分"
+            echo "  孤儿进程: +40 分"
+            echo "  CPU=0%: +20 分"
+            echo "  无网络/I/O活动: +15 分"
+            echo "  运行>600秒: +10 分"
+            echo "  阈值: 50 分"
             exit 0
             ;;
         *)
@@ -165,6 +199,58 @@ is_persistent_app() {
 }
 
 # ============================================
+# 清理函数
+# ============================================
+
+force_kill_process() {
+    local pid="$1"
+    local reason="$2"
+    
+    log "   🔨 强制终止进程 (原因: $reason)"
+    
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log "   [DRY-RUN] 将执行: kill -9 $pid"
+        return 0
+    fi
+    
+    if kill -9 "$pid" 2>/dev/null; then
+        log "   ✅ 进程已强制终止"
+        return 0
+    else
+        log "   ❌ 强制终止失败 (进程可能已结束或权限不足)"
+        return 1
+    fi
+}
+
+restart_systemd_service() {
+    local pid="$1"
+    local service_name="$2"
+    local state="$3"
+    
+    log "🔄 重启 systemd 服务: $service_name"
+    
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log "   [DRY-RUN] 将执行: systemctl restart $service_name"
+        return 0
+    fi
+    
+    if systemctl restart "$service_name" 2>/dev/null; then
+        log "   ✅ 服务已重启"
+        return 0
+    else
+        log "   ❌ systemctl restart 失败"
+        
+        if [[ "$state" == "D" ]] && [[ "$D_STATE_FORCE_KILL" == "true" ]]; then
+            log "   ⚠️ 进程处于 D 状态，尝试强制终止..."
+            force_kill_process "$pid" "D状态进程-systemctl重启失败"
+            return $?
+        fi
+        
+        return 1
+    fi
+}
+
+# ============================================
 # 日志函数
 # ============================================
 
@@ -183,6 +269,7 @@ log() {
 main() {
     local cleaned=0
     local restarted=0
+    local force_killed=0
     local protected=0
     
     log "========== 开始扫描 =========="
@@ -259,24 +346,21 @@ main() {
         
         local service_name
         if service_name=$(get_systemd_service_name "$pid"); then
-            log "🔄 重启 systemd 服务: $service_name"
             log "   PID: $pid, 分数: $stuck_score$reasons"
             log "   CMD: ${cmdline:0:80}"
             
-            if [[ "$DRY_RUN" == "true" ]]; then
-                log "   [DRY-RUN] 将执行: systemctl restart $service_name"
+            if restart_systemd_service "$pid" "$service_name" "$state"; then
+                ((restarted++)) || true
             else
-                if systemctl restart "$service_name" 2>/dev/null; then
-                    log "   ✅ 服务已重启"
-                    ((restarted++)) || true
-                else
-                    log "   ❌ 重启失败"
+                if [[ "$state" == "D" ]]; then
+                    ((force_killed++)) || true
                 fi
             fi
         else
             log "🧹 清理卡死进程:"
             log "   PID: $pid"
             log "   分数: $stuck_score (阈值: $STUCK_THRESHOLD)"
+            log "   状态: $state"
             log "   运行: ${uptime}s"
             log "   原因:$reasons"
             log "   CMD: ${cmdline:0:80}"
@@ -298,6 +382,7 @@ main() {
     log "========== 扫描完成 =========="
     log "普通进程清理: $cleaned"
     log "服务重启: $restarted"
+    log "强制终止(D状态): $force_killed"
     log "受保护: $protected"
 }
 
